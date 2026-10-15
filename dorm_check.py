@@ -17,6 +17,8 @@ NTFY_TOPIC = os.environ["NTFY_TOPIC"]
 
 LOGIN_URL = "https://studentas.vdu.lt/dormitory/login"
 NO_VACANCY_TEXT = "No vacancies were found"
+# Skip any region whose name contains this (e.g. "Vilnius"/"Vilniaus") - no notifications from it.
+REGION_EXCLUDE = os.environ.get("REGION_EXCLUDE", "viln").lower()
 
 
 def notify(message, urgent=False):
@@ -80,10 +82,18 @@ def login(page):
 
 def check_all_regions(page):
     found = []
-    regions = real_options(page.locator("select").nth(0))
-    print("  regions found:", [r["t"] for r in regions])
-    if not regions:
+    all_regions = real_options(page.locator("select").nth(0))
+    print("  regions found:", [r["t"] for r in all_regions])
+    if not all_regions:
         raise RuntimeError("no regions found on the page")
+
+    regions = [r for r in all_regions if REGION_EXCLUDE not in r["t"].lower()]
+    print("  checking only:", [r["t"] for r in regions])
+    if not regions:
+        raise RuntimeError(
+            f"all regions match exclude filter '{REGION_EXCLUDE}'. Available: "
+            + ", ".join(r["t"] for r in all_regions)
+        )
 
     for region in regions:
         page.locator("select").nth(0).select_option(value=region["v"])
