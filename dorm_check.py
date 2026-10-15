@@ -81,8 +81,8 @@ def switch_to_english(page):
 def login(page):
     page.goto(
         LOGIN_URL,
-        wait_until="domcontentloaded",
-        timeout=PAGE_TIMEOUT,
+        wait_until="commit",
+        timeout=90000,
     )
 
     password_input = page.locator("input[type='password']").first
