@@ -1,0 +1,31 @@
+name: Dorm check
+
+on:
+  schedule:
+    - cron: "*/20 * * * *" # Pro-tip: Spacing out to 20-30 mins reduces the risk of aggressive IP blocking
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install playwright requests playwright-stealth
+      - run: playwright install --with-deps chromium
+      
+      # Replaced standard run with a retry logic wrapper
+      - name: Run Dorm Check with Retries
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 3
+          max_attempts: 3
+          retry_on: error
+          command: python dorm_check.py
+        env:
+          VDU_USERNAME: ${{ secrets.VDU_USERNAME }}
+          VDU_PASSWORD: ${{ secrets.VDU_PASSWORD }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
