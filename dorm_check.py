@@ -1,8 +1,12 @@
-
+"""
+VMU dormitory vacancy check - runs ONCE per call (GitHub Actions calls it every ~10 min).
+Login details and the ntfy topic come from GitHub Secrets, not from this file.
+"""
 import datetime
 import os
 import re
 import sys
+import time
 import traceback
 
 import requests
@@ -14,256 +18,168 @@ NTFY_TOPIC = os.environ["NTFY_TOPIC"]
 
 LOGIN_URL = "https://studentas.vdu.lt/dormitory/login"
 NO_VACANCY_TEXT = "No vacancies were found"
-REGION_EXCLUDE = os.environ.get("REGION_EXCLUDE", "viln").lower()
 
-REQUEST_TIMEOUT = 15
-PAGE_TIMEOUT = 30000
-MAX_ATTEMPTS = 2
+# Only regions whose name contains one of these words are checked ("Kaunas" also covers "Kaunas raj.").
+WANTED_REGIONS = ["Kaun"]
+
+# Each scheduled run does one check. If it fails (slow site), it retries up to 3 times, 30 s apart.
+CHECKS_PER_RUN = 1
+GAP_SECONDS = 0
+CHECK_ATTEMPTS = 5
+RETRY_WAIT = 30
 
 
 def notify(message, urgent=False):
-    headers = {}
-    if urgent:
-        headers = {"Priority": "urgent", "Tags": "rotating_light"}
-
+    # urgent=True sends at ntfy's highest priority (loud, long vibration, can bypass Do Not Disturb)
+    headers = {"Priority": "urgent", "Tags": "rotating_light"} if urgent else {}
     try:
-        response = requests.post(
-            f"https://ntfy.sh/{NTFY_TOPIC}",
-            data=message.encode("utf-8"),
-            headers=headers,
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        print("Notification sent.")
-    except Exception as exc:
-        print("Could not send notification:", exc)
+        requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=message.encode("utf-8"),
+                      headers=headers, timeout=15)
+    except Exception as e:
+        print("Could not send notification:", e)
 
 
 def settle(page):
+    """Wait for the page to calm down, but never fail just because it keeps loading."""
     try:
-        page.wait_for_load_state("networkidle", timeout=10000)
+        page.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
         pass
     page.wait_for_timeout(1000)
 
 
 def real_options(select):
-    options = select.locator("option").evaluate_all(
+    opts = select.locator("option").evaluate_all(
         "els => els.map(e => ({v: e.value, t: e.textContent.trim()}))"
     )
-    return [o for o in options if o["v"].strip()]
+    return [o for o in opts if o["v"].strip() != ""]
 
 
 def switch_to_english(page):
-    selectors = [
-        "a[href*='lang=en']",
-        "a[href*='/en']",
-        "img[src*='gb']",
-        "img[src*='en.']",
-        "img[alt*='ngl' i]",
-        "img[alt='EN']",
-    ]
-
-    for selector in selectors:
-        element = page.locator(selector)
-        if element.count():
-            try:
-                element.first.click(timeout=3000)
-                settle(page)
-                print("Switched to English.")
-                return
-            except Exception:
-                continue
-
-    print("English switch not found; continuing.")
+    for sel in ["a[href*='lang=en']", "a[href*='/en']", "img[src*='gb']",
+                "img[src*='en.']", "img[alt*='ngl' i]", "img[alt='EN']"]:
+        el = page.locator(sel)
+        if el.count():
+            el.first.click()
+            settle(page)
+            print("  switched to English")
+            return
+    print("  WARNING: could not find the English flag")
 
 
 def login(page):
-    page.goto(
-        LOGIN_URL,
-        wait_until="commit",
-        timeout=90000,
-    )
-
-    password_input = page.locator("input[type='password']").first
-    password_input.wait_for(state="visible", timeout=PAGE_TIMEOUT)
-
+    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+    page.locator("input[type=password]").first.wait_for(state="visible")
+    page.wait_for_timeout(2000)
     switch_to_english(page)
-
-    password_input = page.locator("input[type='password']").first
-    password_input.wait_for(state="visible", timeout=PAGE_TIMEOUT)
-    password_input.fill(PASSWORD)
-
-    username_input = page.locator(
-        "input[type='text'], input[type='email'], input:not([type])"
-    ).first
-    username_input.fill(USERNAME)
-    password_input.press("Enter")
+    page.locator("input[type=password]").first.wait_for(state="visible")
+    page.wait_for_timeout(2000)
+    page.locator("input[type=password]").first.fill(PASSWORD)
+    page.locator("input[type=text], input[type=email], input:not([type])").first.fill(USERNAME)
+    page.locator("input[type=password]").first.press("Enter")
     settle(page)
-
-    print("After login URL:", page.url)
-
-    # If login did not lead to the dormitory search page,
-    # try opening the student rooms section.
-    if page.locator("select").count() < 3:
-        student_link = page.get_by_text(
-            re.compile(r"Studentų kambarius|Student", re.I)
-        )
-        if student_link.count():
-            student_link.first.click()
-            settle(page)
+    print("  after login, page is:", page.url)
 
     if page.locator("select").count() < 3:
-        raise RuntimeError(
-            "Could not find the three dormitory search dropdowns. "
-            "Login may have failed or the page structure changed."
-        )
-
-    print("Dormitory search page is ready.")
+        page.get_by_text(re.compile(r"Studentų kambarius|Student", re.I)).first.click()
+        settle(page)
+        page.wait_for_timeout(1500)
+        print("  opened student rooms:", page.url)
+    print("  dropdowns found:", page.locator("select").count())
 
 
 def check_all_regions(page):
     found = []
-    all_regions = real_options(page.locator("select").nth(0))
-
-    if not all_regions:
-        raise RuntimeError("No regions found.")
-
-    regions = [
-        region for region in all_regions
-        if REGION_EXCLUDE not in region["t"].lower()
-    ]
-
-    print("Regions to check:", [r["t"] for r in regions])
-
+    regions = real_options(page.locator("select").nth(0))
+    print("  regions on site:", [r["t"] for r in regions])
+    regions = [r for r in regions if any(w.lower() in r["t"].lower() for w in WANTED_REGIONS)]
+    print("  regions checked:", [r["t"] for r in regions])
     if not regions:
-        raise RuntimeError(
-            f"No regions left after exclusion filter: {REGION_EXCLUDE}"
-        )
+        raise RuntimeError("no matching regions found on the page")
 
     for region in regions:
-        print("Checking region:", region["t"])
+        page.locator("select").nth(0).select_option(value=region["v"])
+        page.wait_for_timeout(1500)
 
-        selects = page.locator("select")
-        selects.nth(0).select_option(value=region["v"])
-        page.wait_for_timeout(1000)
+        for i in (1, 2):
+            sel = page.locator("select").nth(i)
+            opts = real_options(sel)
+            if opts:
+                sel.select_option(value=opts[0]["v"])
+                page.wait_for_timeout(800)
 
-        # Choose the first available option in each dependent dropdown.
-        for index in (1, 2):
-            select = page.locator("select").nth(index)
-            options = real_options(select)
-
-            if not options:
-                raise RuntimeError(
-                    f"No options in dropdown {index} for {region['t']}"
-                )
-
-            select.select_option(value=options[0]["v"])
-            page.wait_for_timeout(500)
-
-        search_button = page.get_by_role(
-            "button",
-            name=re.compile(r"Search|Ieškoti", re.I),
-        )
-
-        if not search_button.count():
-            raise RuntimeError("Search button not found.")
-
-        search_button.first.click()
+        page.get_by_role("button", name=re.compile(r"Search|Ieškoti", re.I)).click()
         settle(page)
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(2000)
 
-        text = " ".join(page.locator("body").inner_text().split())
-
-        if not text:
-            raise RuntimeError(
-                f"Empty search response for region {region['t']}"
-            )
-
-        if NO_VACANCY_TEXT.lower() in text.lower():
-            print(f"{region['t']}: no vacancies.")
-            continue
-
-        # Unknown results must not be treated as vacancies.
-        # Confirm the actual vacancy-result selector/text from the
-        # live site before enabling vacancy notifications.
-        print(
-            f"UNKNOWN RESULT for {region['t']}: "
-            f"{text[:500]}"
-        )
-
-        raise RuntimeError(
-            f"Could not verify vacancy status for {region['t']}. "
-            "Check the search result page structure."
-        )
-
+        text = page.inner_text("body")
+        if NO_VACANCY_TEXT in text:
+            print(f"  {region['t']}: no vacancies")
+        else:
+            print(f"  {region['t']}: CHANGED!")
+            print("  page text starts with:", " ".join(text.split())[:300])
+            found.append(region["t"])
     return found
 
 
-def run_once():
-    browser = None
+def run_session(num_checks):
+    """Logs in, then checks several times, a few minutes apart.
+    Returns (regions_found, successful_checks, last_error)."""
+    notified = set()
+    successes, last_error = 0, None
 
-    try:
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-
-            context = browser.new_context(locale="en-US")
-            page = context.new_page()
-            page.set_default_timeout(PAGE_TIMEOUT)
-
-            try:
-                login(page)
-                found = check_all_regions(page)
-                return found, None
-            finally:
-                context.close()
-                browser.close()
-                browser = None
-
-    except Exception as exc:
-        traceback.print_exc()
-
-        if browser is not None:
-            try:
-                browser.close()
-            except Exception:
-                pass
-
-        return [], exc
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = page = None
+        try:
+            for i in range(num_checks):
+                if i > 0:
+                    time.sleep(GAP_SECONDS)
+                for attempt in range(1, CHECK_ATTEMPTS + 1):
+                    try:
+                        if context is None:  # (re)login when needed
+                            context = browser.new_context(locale="en-US")
+                            page = context.new_page()
+                            page.set_default_timeout(90000)
+                            login(page)
+                        found = check_all_regions(page)
+                        successes += 1
+                        for region in found:
+                            if region not in notified:  # one alert per region per run
+                                notified.add(region)
+                                notify(f"ROOM POSSIBLY AVAILABLE in {region}! Go check studentas.vdu.lt/dormitory now!", urgent=True)
+                        break
+                    except Exception as e:
+                        traceback.print_exc()
+                        last_error = e
+                        print(f"Attempt {attempt} of {CHECK_ATTEMPTS} failed: {e}")
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
+                        context = page = None  # login again on the next attempt
+                        if attempt < CHECK_ATTEMPTS:
+                            time.sleep(RETRY_WAIT)
+        finally:
+            browser.close()
+    return notified, successes, last_error
 
 
 def main():
-    found = []
-    error = None
+    manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    num_checks = 1 if manual else CHECKS_PER_RUN  # (manual runs: same)
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        print(f"Attempt {attempt}/{MAX_ATTEMPTS}")
-
-        found, error = run_once()
-
-        if error is None:
-            break
-
-        print("Attempt failed:", error)
+    notified, successes, error = run_session(num_checks)
+    print(f"Done: {successes} of {num_checks} checks succeeded.")
 
     now = datetime.datetime.now(datetime.timezone.utc)
-    timestamp = now.strftime("%Y-%m-%d %H:%M UTC")
-
-    if error is not None:
-        notify(
-            f"Dorm check FAILED at {timestamp}: {str(error)[:250]}"
-        )
-        sys.exit(1)
-
-    if found:
-        notify(
-            "POSSIBLE ROOM AVAILABLE in: "
-            + ", ".join(found)
-            + ". Check the official dormitory page now!",
-            urgent=True,
-        )
-    else:
-        notify(f"Dorm check completed at {timestamp}.")
+    if successes == 0:
+        # Every check failed. Alert always on manual runs, otherwise about once a day.
+        if manual or (now.hour == 9 and now.minute < 20):
+            notify("Dorm check failed: " + str(error)[:150])
+        sys.exit(1)  # red X on GitHub
+    elif manual and not notified:
+        notify("Test run OK: logged in, no vacancies right now. Cloud check works.", urgent=True)
 
 
 if __name__ == "__main__":
