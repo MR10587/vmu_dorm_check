@@ -67,25 +67,89 @@ def switch_to_english(page):
     print("  WARNING: could not find the English flag")
 
 
+
 def login(page):
-    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
-    page.locator("input[type=password]").first.wait_for(state="visible")
+    # Check whether the VMU website responds from GitHub Actions.
+    try:
+        started = time.monotonic()
+        response = requests.get(
+            LOGIN_URL,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; VMUDormChecker/1.0)"
+                )
+            },
+            timeout=(10, 25),
+            allow_redirects=True,
+        )
+        print(
+            "HTTP connectivity probe:",
+            f"status={response.status_code}",
+            f"final_url={response.url}",
+            f"elapsed={time.monotonic() - started:.1f}s",
+        )
+    except requests.RequestException as exc:
+        print(
+            "HTTP connectivity probe failed:",
+            f"{type(exc).__name__}: {exc}",
+        )
+
+    # Do not wait for DOMContentLoaded during navigation:
+    # it was timing out in GitHub Actions.
+    try:
+        response = page.goto(
+            LOGIN_URL,
+            wait_until="commit",
+            timeout=60000,
+        )
+        print(
+            "Browser navigation:",
+            f"status={response.status if response else 'no response'}",
+            f"url={page.url}",
+        )
+    except Exception as exc:
+        print(
+            "Browser navigation failed:",
+            f"{type(exc).__name__}: {exc}",
+        )
+        try:
+            print("Current URL:", page.url)
+            print("Page title:", page.title())
+        except Exception:
+            pass
+        raise
+
+    password_field = page.locator("input[type=password]").first
+    password_field.wait_for(state="visible", timeout=45000)
+    print("Login form is visible")
+
     page.wait_for_timeout(2000)
     switch_to_english(page)
-    page.locator("input[type=password]").first.wait_for(state="visible")
+
+    password_field = page.locator("input[type=password]").first
+    password_field.wait_for(state="visible", timeout=20000)
     page.wait_for_timeout(2000)
-    page.locator("input[type=password]").first.fill(PASSWORD)
-    page.locator("input[type=text], input[type=email], input:not([type])").first.fill(USERNAME)
-    page.locator("input[type=password]").first.press("Enter")
+    password_field.fill(PASSWORD)
+
+    username_field = page.locator(
+        "input[type=text], input[type=email], input:not([type])"
+    ).first
+    username_field.fill(USERNAME)
+
+    password_field.press("Enter")
     settle(page)
-    print("  after login, page is:", page.url)
+    print("After login, page is:", page.url)
 
     if page.locator("select").count() < 3:
-        page.get_by_text(re.compile(r"Studentų kambarius|Student", re.I)).first.click()
+        page.get_by_text(
+            re.compile(r"Studentų kambarius|Student", re.I)
+        ).first.click()
         settle(page)
         page.wait_for_timeout(1500)
-        print("  opened student rooms:", page.url)
-    print("  dropdowns found:", page.locator("select").count())
+        print("Opened student rooms:", page.url)
+
+    print("Dropdowns found:", page.locator("select").count())
+
 
 
 def check_all_regions(page):
