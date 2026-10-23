@@ -25,8 +25,8 @@ WANTED_REGIONS = ["Kaun"]
 # Each scheduled run does one check. If it fails (slow site), it retries up to 3 times, 30 s apart.
 CHECKS_PER_RUN = 1
 GAP_SECONDS = 0
-CHECK_ATTEMPTS = 5
-RETRY_WAIT = 30
+CHECK_ATTEMPTS = 2
+RETRY_WAIT = 10
 
 
 def notify(message, urgent=False):
