@@ -40,12 +40,12 @@ def notify(message, urgent=False):
 
 
 def settle(page):
-    """Wait for the page to calm down, but never fail just because it keeps loading."""
+    """Wait briefly; do not let slow network requests stall the check."""
     try:
-        page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_load_state("networkidle", timeout=4000)
     except Exception:
         pass
-    page.wait_for_timeout(1000)
+    page.wait_for_timeout(500)
 
 
 def real_options(select):
